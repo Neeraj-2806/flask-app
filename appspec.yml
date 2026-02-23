@@ -1,0 +1,18 @@
+version: 0.0
+os: linux
+
+hooks:
+  ApplicationStop:
+    - location: scripts/stop_container.sh
+      timeout: 300
+      runas: root
+
+  BeforeInstall:
+    - location: scripts/remove_container.sh
+      timeout: 300
+      runas: root
+
+  AfterInstall:
+    - location: scripts/run_container.sh
+      timeout: 300
+      runas: root
