@@ -1,0 +1,94 @@
+version: 0.2
+
+env:
+  parameter-store:
+    DOCKER_USERNAME: "/docker/username"
+    DOCKER_PASSWORD: "/docker/password"
+    SONAR_HOST_URL: "/sonar/host-url"
+    SONAR_TOKEN: "/sonar/token"
+    GIT_USERNAME: "/git/username"
+    GIT_TOKEN: "/git/token"
+
+phases:
+
+  pre_build:
+    commands:
+      - echo "Starting pipeline"
+
+      # SonarQube Scan
+      - echo "Running SonarQube Scan"
+      - sonar-scanner \
+        -Dsonar.projectKey=flask-app \
+        -Dsonar.sources=. \
+        -Dsonar.host.url=$SONAR_HOST_URL \
+        -Dsonar.login=$SONAR_TOKEN
+
+      # Sonar Quality Gate Check
+      - echo "Checking SonarQube Quality Gate"
+      - |
+        STATUS=$(curl -s -u $SONAR_TOKEN: $SONAR_HOST_URL/api/qualitygates/project_status?projectKey=flask-app | jq -r '.projectStatus.status')
+        echo "Quality Gate Status = $STATUS"
+
+        if [ "$STATUS" != "OK" ]; then
+          echo "Quality Gate Failed"
+          exit 1
+        fi
+
+      # Docker Login
+      - echo "Logging into DockerHub"
+      - echo $DOCKER_PASSWORD | docker login -u $DOCKER_USERNAME --password-stdin
+
+      # Image Variables
+      - IMAGE_REPO_NAME=neeraj2806/flask-app
+      - COMMIT_HASH=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-7)
+      - IMAGE_TAG=build-$CODEBUILD_BUILD_NUMBER-$COMMIT_HASH
+
+      - echo "Image tag = $IMAGE_TAG"
+
+  build:
+    commands:
+      - echo "Building Docker Image"
+      - docker build -t $IMAGE_REPO_NAME:$IMAGE_TAG .
+
+      # Install Trivy
+      - echo "Installing Trivy"
+      - wget https://github.com/aquasecurity/trivy/releases/latest/download/trivy_0.50.1_Linux-64bit.tar.gz
+      - tar zxvf trivy_0.50.1_Linux-64bit.tar.gz
+      - mv trivy /usr/local/bin/
+
+      # Trivy Scan
+      - echo "Running Trivy Security Scan"
+      - trivy image \
+        --severity HIGH,CRITICAL \
+        --exit-code 1 \
+        --format table \
+        --output trivy-report.txt \
+        $IMAGE_REPO_NAME:$IMAGE_TAG
+
+  post_build:
+    commands:
+      - echo "Pushing Docker Image"
+      - docker push $IMAGE_REPO_NAME:$IMAGE_TAG
+
+      # Clone GitOps repo
+      - echo "Cloning GitOps repository"
+      - git clone https://$GIT_USERNAME:$GIT_TOKEN@github.com/username/k8s-manifests.git
+      - cd k8s-manifests
+
+      # Update Kubernetes manifest files for changing the image tag in deployment
+      - echo "Updating deployment image"
+      - sed -i "s|image: neeraj2806/flask-app:.*|image: neeraj2806/flask-app:$IMAGE_TAG|" deployment.yaml
+
+      # Commit and Push to github 
+      - git config --global user.email "neeraj@example.com"
+      - git config --global user.name "neeraj-karwa"
+
+      - git add deployment.yaml
+      - git commit -m "Update image to $IMAGE_TAG"
+      - git push origin main
+
+      - echo "GitOps repo updated successfully"
+
+artifacts:
+  files:
+    - trivy-report.txt
